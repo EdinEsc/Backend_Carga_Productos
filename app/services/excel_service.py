@@ -1,8 +1,3 @@
-# =========================
-# app/services/excel_service.py
-# (REEMPLAZA TODO el archivo por este contenido)
-# =========================
-
 import io
 import re
 import unicodedata
@@ -54,6 +49,88 @@ def clean_alnum_spaces(v) -> str:
 def clean_category_value(v) -> str:
     s = clean_alnum_spaces(v)
     return s if re.search(r"[A-Z0-9]", s) else ""
+
+
+# =========================
+# UNIDAD (solo palabras completas)
+# =========================
+# Mapea abreviaturas comunes -> palabra completa
+_UNIT_ABBR_MAP = {
+    # unidad
+    "UND": "UNIDAD",
+    "UNID": "UNIDAD",
+    "UNI": "UNIDAD",
+    "U": "UNIDAD",
+    # paquete
+    "PAQ": "PAQUETE",
+    "PAQT": "PAQUETE",
+    "PAQU": "PAQUETE",
+    # botella
+    "BOT": "BOTELLA",
+    "BT": "BOTELLA",
+    # saco
+    "SAC": "SACO",
+    # caja
+    "CJ": "CAJA",
+    "CAJ": "CAJA",
+    # bolsa
+    "BOL": "BOLSA",
+}
+
+# Unidades permitidas “de negocio” (si quieres ampliar, agrega aquí)
+_ALLOWED_UNITS = {
+    "UNIDAD",
+    "PAQUETE",
+    "BOTELLA",
+    "SACO",
+    "CAJA",
+    "BOLSA",
+}
+
+def clean_unit_value(v) -> str:
+    """
+    - Si vacío -> UNIDAD
+    - Si tiene números/símbolos -> intenta resolver abreviatura; si no, UNIDAD
+    - Solo letras y espacios; sin puntos.
+    - Si no está en catálogo permitido, por defecto UNIDAD (estricto).
+    """
+    s = normalize_text_value(v)
+    if not s:
+        return "UNIDAD"
+
+    # Quita puntos y separadores frecuentes, y normaliza espacios
+    s2 = re.sub(r"[.\-_/\\()]+", " ", s)
+    s2 = re.sub(r"\s+", " ", s2).strip()
+
+    # Token principal (ej. "PAQ", "UND", "BOT")
+    # Si viene algo tipo "PAQ." ya lo limpiamos; si "12 UND" o "UND 12" detectaremos dígitos.
+    has_digits = bool(re.search(r"\d", s2))
+    has_non_letters = bool(re.search(r"[^A-Z Ñ ]", s2))  # ya está en upper
+
+    # Convertimos a tokens de letras (ignora cosas raras)
+    tokens = [t for t in s2.split() if t]
+
+    # Si hay dígitos o símbolos, buscamos abreviatura reconocible en tokens
+    if has_digits or has_non_letters:
+        for t in tokens:
+            t_clean = re.sub(r"[^A-ZÑ]", "", t)
+            if t_clean in _UNIT_ABBR_MAP:
+                return _UNIT_ABBR_MAP[t_clean]
+        return "UNIDAD"
+
+    # Si solo letras/espacios:
+    # Caso 1: un solo token y es abreviatura -> expandir
+    if len(tokens) == 1 and tokens[0] in _UNIT_ABBR_MAP:
+        return _UNIT_ABBR_MAP[tokens[0]]
+
+    # Caso 2: ya es palabra completa (o varias palabras) -> validación estricta por catálogo
+    candidate = " ".join(tokens).strip()
+    if candidate in _ALLOWED_UNITS:
+        return candidate
+
+    # Si no está permitido (evita “abreviados raros” o cosas como “PQT”, “PACK”, etc.)
+    # Puedes ampliar _ALLOWED_UNITS si necesitas.
+    return "UNIDAD"
 
 
 ALNUM = set(string.ascii_uppercase + string.digits)
@@ -177,6 +254,13 @@ def normalize_to_dataframe(
     if col_cat:
         df[col_cat] = df[col_cat].apply(clean_category_value)
 
+    # UNIDAD: si existe, normalizar; si no existe, crear default
+    if col_unidad:
+        df[col_unidad] = df[col_unidad].apply(clean_unit_value)
+    else:
+        col_unidad = "__UNIDAD__"
+        df[col_unidad] = "UNIDAD"
+
     # Código: corrige inválidos/duplicados
     existing = set()
     codes_fixed = 0
@@ -244,14 +328,6 @@ def normalize_to_dataframe(
 # =========================
 # FUNCIÓN PRINCIPAL (genera Excel QA)
 # =========================
-
-
-# def normalize_excel_bytes(
-#     excel_bytes: bytes,
-#     round_numeric: Optional[int] = None,
-#     selected_row_ids: Optional[list[int]] = None,
-# ) -> Tuple[bytes, dict]:
-
 def normalize_excel_bytes(
     excel_bytes: bytes,
     round_numeric: Optional[int] = None,
@@ -295,6 +371,13 @@ def normalize_excel_bytes(
     if col_cat:
         df[col_cat] = df[col_cat].apply(clean_category_value)
 
+    # UNIDAD: si existe, normalizar; si no existe, crear default
+    if col_unidad:
+        df[col_unidad] = df[col_unidad].apply(clean_unit_value)
+    else:
+        col_unidad = "__UNIDAD__"
+        df[col_unidad] = "UNIDAD"
+
     # Si el frontend envía selección, filtrar a esas filas
     if selected_row_ids is not None and len(selected_row_ids) > 0 and col_nombre:
         wanted = set(int(x) for x in selected_row_ids)
@@ -310,7 +393,6 @@ def normalize_excel_bytes(
 
         df = df.loc[keep_mask].copy()
         df = df.reset_index(drop=True)
-
 
     # Código: corrige inválidos/duplicados
     existing = set()
@@ -349,7 +431,6 @@ def normalize_excel_bytes(
 
     if apply_igv_sale and col_pventa:
         df[col_pventa] = df[col_pventa].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
-
 
     if col_stock:
         df[col_stock] = df[col_stock].apply(to_number).apply(lambda x: 0.0 if _is_null(x) else x)
@@ -407,9 +488,10 @@ def normalize_excel_bytes(
             ok = False
             push_error(i, codigo, col_nombre or "NOMBRE", "", "NOMBRE VACÍO", "", "Nombre es obligatorio.")
 
+        # UNIDAD ya viene normalizada y con default, así que solo validamos por seguridad
         if not str(unidad).strip():
             ok = False
-            push_error(i, codigo, col_unidad or "UNIDAD", "", "UNIDAD VACÍA", "", "Unidad es obligatoria.")
+            push_error(i, codigo, col_unidad or "UNIDAD", "", "UNIDAD VACÍA", "UNIDAD", "Unidad es obligatoria. Se asigna UNIDAD.")
 
         if str(categoria).strip() == "SIN CATEGORIA":
             push_error(i, codigo, col_cat or "CATEGORIA", "", "CATEGORÍA VACÍA -> DEFAULT",
