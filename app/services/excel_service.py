@@ -1,3 +1,4 @@
+
 import io
 import re
 import unicodedata
@@ -240,6 +241,9 @@ def normalize_to_dataframe(
     col_unidad = _find_col(df, "UNIDAD")
     col_stock = _find_col(df, "CANTIDAD") or _find_col(df, "STOCK")
     col_stock_min = _find_col(df, "STOCK MINIMO")
+    col_marca = _find_col(df, "MARCA")
+    col_modelo = _find_col(df, "MODELO")
+    col_porcentaje = _find_col(df, "PORCENTAJE") or _find_col(df, "PORCENTAJE COSTO")
 
     # Normaliza texto en object
     for c in df.columns:
@@ -260,6 +264,20 @@ def normalize_to_dataframe(
     else:
         col_unidad = "__UNIDAD__"
         df[col_unidad] = "UNIDAD"
+
+    # MARCA: asignar S/M si está vacío
+    if col_marca:
+        df[col_marca] = df[col_marca].apply(lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip())
+    else:
+        col_marca = "__MARCA__"
+        df[col_marca] = "S/M"
+
+    # MODELO: asignar S/M si está vacío
+    if col_modelo:
+        df[col_modelo] = df[col_modelo].apply(lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip())
+    else:
+        col_modelo = "__MODELO__"
+        df[col_modelo] = "S/M"
 
     # Código: corrige inválidos/duplicados
     existing = set()
@@ -305,6 +323,13 @@ def normalize_to_dataframe(
         col_cat = "__CAT__"
         df[col_cat] = "SIN CATEGORIA"
 
+    # PORCENTAJE: por defecto 18% en analyze (sin Selva porque aún no se sabe)
+    if col_porcentaje:
+        df[col_porcentaje] = df[col_porcentaje].apply(to_number).apply(lambda x: 18.0 if _is_null(x) or x <= 0 else x)
+    else:
+        col_porcentaje = "__PORCENTAJE__"
+        df[col_porcentaje] = 18.0
+
     if round_numeric is not None:
         num_cols = df.select_dtypes(include=["number"]).columns
         df[num_cols] = df[num_cols].round(round_numeric)
@@ -319,6 +344,9 @@ def normalize_to_dataframe(
         "col_unidad": col_unidad,
         "col_stock": col_stock,
         "col_stock_min": col_stock_min,
+        "col_marca": col_marca,
+        "col_modelo": col_modelo,
+        "col_porcentaje": col_porcentaje,
     }
 
     stats = {"rows_before": int(before_rows), "codes_fixed": int(codes_fixed)}
@@ -326,7 +354,7 @@ def normalize_to_dataframe(
 
 
 # =========================
-# FUNCIÓN PRINCIPAL (genera Excel QA)
+# FUNCIÓN PRINCIPAL (genera Excel QA) - ACTUALIZADA CON SELVA
 # =========================
 def normalize_excel_bytes(
     excel_bytes: bytes,
@@ -334,6 +362,7 @@ def normalize_excel_bytes(
     selected_row_ids: Optional[list[int]] = None,
     apply_igv_cost: bool = False,
     apply_igv_sale: bool = False,
+    is_selva: bool = False,  # NUEVO: parámetro para Selva
 ) -> Tuple[bytes, dict]:
 
     ROW_ID_COL = "__ROW_ID__"
@@ -350,11 +379,18 @@ def normalize_excel_bytes(
     # Detecta columnas
     col_codigo = _find_col(df, "CODIGO")
     col_nombre = _find_col(df, "NOMBRE")
+    col_codigo_padre = _find_col(df, "CODIGO PADRE")
+    col_codigo_alterno = _find_col(df, "CODIGO ALTERNO")
+    col_codigo_barra = _find_col(df, "CODIGO BARRA")
     col_desc = _find_col(df, "DESCRIPCION")
     col_cat = _find_col(df, "CATEGORIA")
     col_pcost = _find_col(df, "PRECIO DE COSTO")
     col_pventa = _find_col(df, "PRECIO DE VENTA")
     col_unidad = _find_col(df, "UNIDAD")
+    col_porcentaje = _find_col(df, "PORCENTAJE") or _find_col(df, "PORCENTAJE COSTO")
+    col_marca = _find_col(df, "MARCA")
+    col_modelo = _find_col(df, "MODELO")
+    col_almacenable = _find_col(df, "ALMACENABLE")
     col_stock = _find_col(df, "CANTIDAD") or _find_col(df, "STOCK")
     col_stock_min = _find_col(df, "STOCK MINIMO")
 
@@ -377,6 +413,32 @@ def normalize_excel_bytes(
     else:
         col_unidad = "__UNIDAD__"
         df[col_unidad] = "UNIDAD"
+
+    # MARCA: asignar S/M si está vacío
+    if col_marca:
+        df[col_marca] = df[col_marca].apply(lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip())
+    else:
+        col_marca = "__MARCA__"
+        df[col_marca] = "S/M"
+
+    # MODELO: asignar S/M si está vacío
+    if col_modelo:
+        df[col_modelo] = df[col_modelo].apply(lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip())
+    else:
+        col_modelo = "__MODELO__"
+        df[col_modelo] = "S/M"
+
+    # ===== NUEVO: PORCENTAJE según SELVA =====
+    # Si es Selva → 0%, si no → 18% (o el valor del Excel)
+    porcentaje_default = 0.0 if is_selva else 18.0
+    
+    if col_porcentaje:
+        df[col_porcentaje] = df[col_porcentaje].apply(to_number).apply(
+            lambda x: porcentaje_default if _is_null(x) or x <= 0 else x
+        )
+    else:
+        col_porcentaje = "__PORCENTAJE__"
+        df[col_porcentaje] = porcentaje_default
 
     # Si el frontend envía selección, filtrar a esas filas
     if selected_row_ids is not None and len(selected_row_ids) > 0 and col_nombre:
@@ -424,12 +486,14 @@ def normalize_excel_bytes(
         df[col_pventa] = 1.0
 
     # =========================
-    # IGV (según toggles frontend)
+    # IGV (según toggles frontend) - CON PROTECCIÓN PARA SELVA
     # =========================
-    if apply_igv_cost and col_pcost:
+    # NOTA: El frontend ya bloquea los toggles cuando is_selva=True, 
+    # pero añadimos protección extra por si acaso
+    if apply_igv_cost and col_pcost and not is_selva:
         df[col_pcost] = df[col_pcost].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
 
-    if apply_igv_sale and col_pventa:
+    if apply_igv_sale and col_pventa and not is_selva:
         df[col_pventa] = df[col_pventa].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
 
     if col_stock:
@@ -446,6 +510,12 @@ def normalize_excel_bytes(
     else:
         col_cat = "__CAT__"
         df[col_cat] = "SIN CATEGORIA"
+
+    if col_almacenable:
+        df[col_almacenable] = df[col_almacenable].apply(lambda x: "SI" if str(x).upper() in ["SI", "S", "YES", "Y", "1", "TRUE"] else "NO")
+    else:
+        col_almacenable = "__ALMACENABLE__"
+        df[col_almacenable] = "SI"
 
     if round_numeric is not None:
         num_cols = df.select_dtypes(include=["number"]).columns
@@ -475,6 +545,9 @@ def normalize_excel_bytes(
         nombre = df.at[i, col_nombre] if col_nombre else ""
         unidad = df.at[i, col_unidad] if col_unidad else ""
         categoria = df.at[i, col_cat] if col_cat else "SIN CATEGORIA"
+        marca = df.at[i, col_marca] if col_marca else "S/M"
+        modelo = df.at[i, col_modelo] if col_modelo else "S/M"
+        porcentaje = df.at[i, col_porcentaje] if col_porcentaje else (0.0 if is_selva else 18.0)
 
         pc = float(df.at[i, col_pcost])
         pv = float(df.at[i, col_pventa])
@@ -535,29 +608,37 @@ def normalize_excel_bytes(
 
     # Eliminar ROW_ID_COL de exportaciones
     for dfx in (df, corrected, productos_ok, productos_corregidos):
-        dfx.drop(columns=[ROW_ID_COL], errors="ignore", inplace=True)
+        if ROW_ID_COL in dfx.columns:
+            dfx.drop(columns=[ROW_ID_COL], inplace=True)
 
     final_df = pd.concat([productos_ok, productos_corregidos], ignore_index=True)
 
+    # Valores por defecto para campos que podrían estar vacíos
+    codigo_padre_default = ""
+    codigo_alterno_default = ""
+    r_lista1_default = "0-0-0"
+    w_tienda1_default = final_df[col_stock] if col_stock else 0
+
+    # Ahora MARCA, MODELO y PORCENTAJE ya tienen valores asignados desde antes
     plantilla_api = pd.DataFrame({
         "Nombre": final_df[col_nombre] if col_nombre else "",
         "Descripcion": final_df[col_desc] if col_desc else "",
-        "codigo padre": "",
+        "codigo padre": final_df[col_codigo_padre] if col_codigo_padre else codigo_padre_default,
         "codigo": final_df[col_codigo] if col_codigo else "",
-        "Codigo alterno": "",
+        "Codigo alterno": final_df[col_codigo_alterno] if col_codigo_alterno else codigo_alterno_default,
         "codigo barra": final_df[col_codigo] if col_codigo else "",
         "Categoria": final_df[col_cat],
         "stock": final_df[col_stock],
         "stock minimo": final_df[col_stock_min] if col_stock_min else "",
         "precio costo": final_df[col_pcost],
         "precio venta": final_df[col_pventa],
-        "porcentaje costo": 18,
-        "R-Lista1": "0-0-0",
+        "porcentaje costo": final_df[col_porcentaje],  # Ya tiene el valor correcto (0 o 18)
+        "R-Lista1": r_lista1_default,
         "unidad": final_df[col_unidad] if col_unidad else "",
-        "Marca": "S/M",
-        "Modelo": "S/M",
-        "Almacenable": "SI",
-        "W-Tienda1": final_df[col_stock],
+        "Marca": final_df[col_marca],  # Siempre tiene valor
+        "Modelo": final_df[col_modelo],  # Siempre tiene valor
+        "Almacenable": final_df[col_almacenable] if col_almacenable else "SI",
+        "W-Tienda1": w_tienda1_default,
     })
 
     plantilla_api = plantilla_api[[
@@ -579,6 +660,7 @@ def normalize_excel_bytes(
         "rows_corrected": int(len(productos_corregidos)),
         "errors_count": int(len(errores_df)),
         "codes_fixed": int(codes_fixed),
+        "is_selva": is_selva,  # Información útil para debugging
     }
 
     return out.getvalue(), stats

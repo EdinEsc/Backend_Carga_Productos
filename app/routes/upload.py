@@ -1,8 +1,3 @@
-# =========================
-# app/routes/upload.py
-# (REEMPLAZA TODO el archivo por este contenido)
-# =========================
-
 from uuid import uuid4
 import io
 
@@ -50,12 +45,6 @@ async def analyze_excel(
     }
 
 
-# @router.post("/normalize")
-# async def normalize_excel(
-#     upload_id: str = Query(...),
-#     selected_row_ids: list[int] = Body(default=[]),
-#     round_numeric: int | None = Query(default=None, description="Ej: 2 para redondear a 2 decimales"),
-# ):
 @router.post("/normalize")
 async def normalize_excel(
     upload_id: str = Query(...),
@@ -63,6 +52,9 @@ async def normalize_excel(
     # ⬇️ BOTÓN 1 y BOTÓN 2
     apply_igv_cost: bool = Query(default=False, description="Aplicar IGV a precio de costo"),
     apply_igv_sale: bool = Query(default=False, description="Aplicar IGV a precio de venta"),
+    
+    # ⬇️ NUEVO: Parámetro para Selva
+    is_selva: bool = Query(default=False, description="Activar modo Selva (0% y sin IGV)"),
 
     selected_row_ids: list[int] = Body(default=[]),
     round_numeric: int | None = Query(default=None, description="Ej: 2 para redondear a 2 decimales"),
@@ -72,20 +64,14 @@ async def normalize_excel(
 
     content = UPLOADS[upload_id]
 
-    # cleaned_bytes, stats = normalize_excel_bytes(
-    #     excel_bytes=content,
-    #     round_numeric=round_numeric,
-    #     selected_row_ids=selected_row_ids,
-    # )
-
+    # Pasar TODOS los parámetros al servicio
     cleaned_bytes, stats = normalize_excel_bytes(
         excel_bytes=content,
         round_numeric=round_numeric,
         selected_row_ids=selected_row_ids,
-
-        # ⬇️ se pasan los 2 botones al servicio
         apply_igv_cost=apply_igv_cost,
         apply_igv_sale=apply_igv_sale,
+        is_selva=is_selva,  # ⬅️ IMPORTANTE: pasar el parámetro
     )
 
     filename = "archivo_QA.xlsx"
