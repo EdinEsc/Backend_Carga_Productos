@@ -8,9 +8,12 @@ import string
 import secrets
 import math
 from typing import Optional, Tuple
+
 import pandas as pd
 
 IGV_FACTOR = 1.18
+ROW_ID_COL_DEFAULT = "__ROW_ID__"
+
 
 # ============================================================
 # Normalización base (Ñ OK)
@@ -184,7 +187,7 @@ def _json_safe(v):
 
 
 # ============================================================
-# Duplicados por NOMBRE (para frontend) - SIN row_id
+# Duplicados por NOMBRE - SIN row_id
 # ============================================================
 def build_duplicate_groups(df: pd.DataFrame, col_nombre: str) -> list[dict]:
     mask = df[col_nombre].astype(str).str.strip().ne("") & df[col_nombre].duplicated(keep=False)
@@ -201,12 +204,12 @@ def build_duplicate_groups(df: pd.DataFrame, col_nombre: str) -> list[dict]:
 
 
 # ============================================================
-# Duplicados por NOMBRE (para frontend) - CON row_id
+# Duplicados por NOMBRE - CON row_id
 # ============================================================
 def build_duplicate_groups_with_row_id(
     df: pd.DataFrame,
     col_nombre: str,
-    row_id_col: str = "__ROW_ID__",
+    row_id_col: str = ROW_ID_COL_DEFAULT,
 ) -> list[dict]:
     if col_nombre not in df.columns or row_id_col not in df.columns:
         return []
@@ -226,7 +229,54 @@ def build_duplicate_groups_with_row_id(
 
 
 # ============================================================
-# NORMALIZACIÓN A DF (para /excel/analyze)
+# Helper: drop filas totalmente vacías
+# ============================================================
+def _drop_all_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    tmp = df.copy()
+    for c in tmp.columns:
+        if tmp[c].dtype == "object":
+            tmp[c] = tmp[c].astype(str).str.strip()
+    mask_all_empty = tmp.apply(lambda r: all((x is None) or (str(x).strip() == "") or (str(x).strip().upper() == "NAN") for x in r), axis=1)
+    return df.loc[~mask_all_empty].copy().reset_index(drop=True)
+
+
+# ============================================================
+# ✅ CONVERSIÓN: construir DF desde archivo (ESTO TE FALTABA)
+# ============================================================
+def build_conversion_df_from_file(
+    file_path: str,
+    header_row: int = 3,
+    row_id_col: str = ROW_ID_COL_DEFAULT,
+) -> pd.DataFrame:
+    """
+    Lee el Excel de CONVERSIÓN y devuelve un DataFrame listo:
+    - Lee con header=3 (igual que tus plantillas)
+    - Normaliza nombres de columnas
+    - Normaliza celdas de texto
+    - Elimina filas completamente vacías
+    - Agrega __ROW_ID__ estable (fila Excel real empezando en 5)
+    """
+    df = pd.read_excel(file_path, engine="openpyxl", header=header_row)
+
+    # normalizar columnas
+    df.columns = [normalize_text_value(c) for c in df.columns]
+
+    # normalizar textos
+    for c in df.columns:
+        if df[c].dtype == "object":
+            df[c] = df[c].apply(normalize_text_value)
+
+    df = _drop_all_empty_rows(df)
+
+    # row id estable para UI (siempre 5..)
+    df[row_id_col] = range(5, 5 + len(df))
+    return df
+
+
+# ============================================================
+# NORMALIZACIÓN A DF (para /excel/analyze) - CARGA NORMAL
 # ============================================================
 def normalize_to_dataframe(
     excel_bytes: bytes,
@@ -367,7 +417,7 @@ def normalize_excel_bytes(
     apply_igv_sale: bool = False,
     is_selva: bool = False,
 ) -> Tuple[bytes, dict]:
-    ROW_ID_COL = "__ROW_ID__"
+    ROW_ID_COL = ROW_ID_COL_DEFAULT
 
     df = pd.read_excel(io.BytesIO(excel_bytes), engine="openpyxl", header=3)
     before_rows = len(df)
@@ -436,7 +486,7 @@ def normalize_excel_bytes(
         col_porcentaje = "__PORCENTAJE__"
         df[col_porcentaje] = porcentaje_default
 
-    # ✅ filtro duplicados por NOMBRE (selección UI)
+    # filtro duplicados por NOMBRE (selección UI)
     if selected_row_ids is not None and len(selected_row_ids) > 0 and col_nombre:
         wanted = set(int(x) for x in selected_row_ids)
 
@@ -446,11 +496,7 @@ def normalize_excel_bytes(
         keep_mask = (~df[ROW_ID_COL].isin(dup_row_ids)) | (df[ROW_ID_COL].isin(wanted))
         df = df.loc[keep_mask].copy().reset_index(drop=True)
 
-    # =========================
     # Códigos:
-    # - CODIGO: inválido/duplicado => generar nuevo (CM)
-    # - BARRA/PADRE: inválido/duplicado => VACÍO
-    # =========================
     existing_codigo = set()
     codes_fixed = 0
 
@@ -524,9 +570,7 @@ def normalize_excel_bytes(
         num_cols = df.select_dtypes(include=["number"]).columns
         df[num_cols] = df[num_cols].round(round_numeric)
 
-    # =========================
     # Auditoría + correcciones
-    # =========================
     errores = []
     ok_mask = []
     corrected = df.copy()
@@ -565,26 +609,10 @@ def normalize_excel_bytes(
 
         if not str(unidad).strip():
             ok = False
-            push_error(
-                i,
-                codigo,
-                col_unidad or "UNIDAD",
-                "",
-                "UNIDAD VACÍA",
-                "UNIDAD",
-                "Unidad es obligatoria. Se asigna UNIDAD.",
-            )
+            push_error(i, codigo, col_unidad or "UNIDAD", "", "UNIDAD VACÍA", "UNIDAD", "Unidad es obligatoria. Se asigna UNIDAD.")
 
         if str(categoria).strip() == "SIN CATEGORIA":
-            push_error(
-                i,
-                codigo,
-                col_cat or "CATEGORIA",
-                "",
-                "CATEGORÍA VACÍA -> DEFAULT",
-                "SIN CATEGORIA",
-                "Se asignó default por categoría vacía/ inválida.",
-            )
+            push_error(i, codigo, col_cat or "CATEGORIA", "", "CATEGORÍA VACÍA -> DEFAULT", "SIN CATEGORIA", "Se asignó default por categoría vacía/ inválida.")
 
         if st < 0:
             ok = False
@@ -605,15 +633,7 @@ def normalize_excel_bytes(
         pv2 = float(corrected.at[i, col_pventa])
         if pv2 <= pc2:
             ok = False
-            push_error(
-                i,
-                codigo,
-                col_pventa,
-                pv2,
-                "PRECIO VENTA <= PRECIO COSTO",
-                pv2,
-                "Regla: venta debe ser mayor que costo. No se ajusta automático.",
-            )
+            push_error(i, codigo, col_pventa, pv2, "PRECIO VENTA <= PRECIO COSTO", pv2, "Regla: venta debe ser mayor que costo. No se ajusta automático.")
 
         ok_mask.append(ok)
 
@@ -646,9 +666,7 @@ def normalize_excel_bytes(
 
     final_df = pd.concat([productos_ok, productos_corregidos], ignore_index=True)
 
-    # =========================
     # Plantilla API
-    # =========================
     codigo_padre_default = ""
     codigo_alterno_default = ""
     r_lista1_default = "0-0-0"
@@ -730,7 +748,6 @@ def clean_conversion_output_df(
     round_numeric: Optional[int] = None,
 ) -> tuple[pd.DataFrame, dict]:
     df = df_final.copy()
-
     df.columns = [normalize_text_value(c) for c in df.columns]
 
     col_nombre = _find_col(df, "NOMBRE")
@@ -746,7 +763,7 @@ def clean_conversion_output_df(
     if col_codigo is None:
         col_codigo = _find_col(df, "CODIGO")
 
-    # CODIGO BARRA / CODIGO PADRE => blank si inválido/duplicado
+    # CODIGO BARRA / CODIGO PADRE
     col_codigo_barra = None
     for c in df.columns:
         if normalize_text_value(c) == "CODIGO BARRA":
@@ -796,35 +813,25 @@ def clean_conversion_output_df(
         col_unidad = "UNIDAD"
 
     if col_marca:
-        df[col_marca] = df[col_marca].apply(
-            lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip()
-        )
+        df[col_marca] = df[col_marca].apply(lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip())
     else:
         df["MARCA"] = "S/M"
         col_marca = "MARCA"
 
     if col_modelo:
-        df[col_modelo] = df[col_modelo].apply(
-            lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip()
-        )
+        df[col_modelo] = df[col_modelo].apply(lambda x: "S/M" if pd.isna(x) or str(x).strip() == "" else str(x).strip())
     else:
         df["MODELO"] = "S/M"
         col_modelo = "MODELO"
 
     porcentaje_default = 0.0 if is_selva else 18.0
     if col_porcentaje:
-        df[col_porcentaje] = df[col_porcentaje].apply(to_number).apply(
-            lambda x: porcentaje_default if _is_null(x) or x <= 0 else x
-        )
+        df[col_porcentaje] = df[col_porcentaje].apply(to_number).apply(lambda x: porcentaje_default if _is_null(x) or x <= 0 else x)
     else:
         df["PORCENTAJE COSTO"] = porcentaje_default
         col_porcentaje = "PORCENTAJE COSTO"
 
-    # =========================
     # Códigos (CONVERSIÓN)
-    # - CODIGO: inválido/duplicado => generar nuevo (CM)
-    # - BARRA/PADRE: inválido/duplicado => VACÍO
-    # =========================
     existing_codigo: set[str] = set()
     existing_barra: set[str] = set()
     existing_padre: set[str] = set()
@@ -848,19 +855,12 @@ def clean_conversion_output_df(
 
     if col_codigo:
         df[col_codigo] = df[col_codigo].apply(lambda v: fix_code_generate(v, existing_codigo, "CM"))
-
     if col_codigo_barra:
         df[col_codigo_barra] = df[col_codigo_barra].apply(lambda v: fix_code_blank(v, existing_barra))
-
     if col_codigo_padre:
         df[col_codigo_padre] = df[col_codigo_padre].apply(lambda v: fix_code_blank(v, existing_padre))
 
-    # =========================
-    # Numéricos + reglas (CORREGIDO)
-    # - costo vacío => 0
-    # - venta vacío => 1
-    # - regla pv > pc SOLO si venta NO estaba vacía originalmente
-    # =========================
+    # Numéricos + reglas
     def _is_blank_raw(v) -> bool:
         return v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == ""
 
@@ -912,7 +912,7 @@ def clean_conversion_output_df(
 
 
 # ============================================================
-# CONVERSIÓN: GENERAR QA MULTI-HOJA (como carga normal)
+# CONVERSIÓN: GENERAR QA MULTI-HOJA
 # ============================================================
 def build_conversion_qa_excel_bytes(
     df_input: pd.DataFrame,
@@ -921,7 +921,7 @@ def build_conversion_qa_excel_bytes(
     apply_igv_sale: bool = False,
     round_numeric: Optional[int] = None,
 ) -> tuple[bytes, dict]:
-    ROW_ID_COL = "__ROW_ID__"
+    ROW_ID_COL = ROW_ID_COL_DEFAULT
 
     df0 = df_input.copy()
     if ROW_ID_COL not in df0.columns:
@@ -991,15 +991,7 @@ def build_conversion_qa_excel_bytes(
             push_error(i, codigo, col_unidad or "UNIDAD", "", "UNIDAD VACÍA", "UNIDAD", "Unidad es obligatoria.")
 
         if str(categoria).strip() == "SIN CATEGORIA":
-            push_error(
-                i,
-                codigo,
-                col_cat or "CATEGORIA",
-                "",
-                "CATEGORÍA VACÍA -> DEFAULT",
-                "SIN CATEGORIA",
-                "Se asignó default por categoría vacía/ inválida.",
-            )
+            push_error(i, codigo, col_cat or "CATEGORIA", "", "CATEGORÍA VACÍA -> DEFAULT", "SIN CATEGORIA", "Se asignó default por categoría vacía/ inválida.")
 
         if col_stock and st < 0:
             ok = False
@@ -1016,7 +1008,7 @@ def build_conversion_qa_excel_bytes(
             corrected.at[i, col_pventa] = 1.0
             push_error(i, codigo, col_pventa, pv, "PRECIO VENTA < 1", 1.0, "Venta mínima 1. Se ajustó a 1.")
 
-        # solo validación
+        # validación
         if col_pcost and col_pventa and pv <= pc:
             ok = False
             push_error(i, codigo, col_pventa, pv, "PRECIO VENTA <= PRECIO COSTO", pv, "Regla: venta > costo.")
