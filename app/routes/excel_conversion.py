@@ -1,109 +1,167 @@
-from fastapi import APIRouter, UploadFile, File
-from fastapi.responses import FileResponse
+# =========================
+# excel_conversion.py (COMPLETO - LISTO PARA COPIAR Y PEGAR)
+# =========================
+from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Query, HTTPException, Body
+from fastapi.responses import StreamingResponse
 import pandas as pd
 import uuid
 import os
+import io
+import re
+import unicodedata
+
+from app.services.excel_service import (
+    build_conversion_df_from_file,
+    build_conversion_qa_excel_bytes,
+    build_duplicate_groups_with_row_id,
+)
 
 router = APIRouter(prefix="/conversion", tags=["Conversion Excel"])
 
+ROW_ID_COL = "__ROW_ID__"
 
+
+def cleanup_files(*paths: str):
+    for p in paths:
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+
+def _find_col_loose(df: pd.DataFrame, target: str) -> str | None:
+    """Encuentra columna por contains (case/accent insensitive)."""
+    def norm(s: str) -> str:
+        s = str(s).strip()
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        s = s.upper()
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    t = norm(target)
+    for c in df.columns:
+        if t in norm(c):
+            return c
+    return None
+
+
+def _filter_duplicates_by_selected(df: pd.DataFrame, col_nombre: str, selected_ids: set[int]) -> pd.DataFrame:
+    """
+    Igual que en carga normal:
+    - Si un nombre está duplicado, solo se queda la(s) fila(s) seleccionada(s).
+    - Lo NO duplicado se queda siempre.
+    """
+    if not col_nombre or col_nombre not in df.columns:
+        return df
+
+    s = df[col_nombre].astype(str).str.strip()
+    dup_mask = s.ne("") & df[col_nombre].duplicated(keep=False)
+
+    if not dup_mask.any():
+        return df
+
+    dup_row_ids = set(df.loc[dup_mask, ROW_ID_COL].astype(int).tolist())
+
+    keep_mask = (~df[ROW_ID_COL].isin(dup_row_ids)) | (df[ROW_ID_COL].isin(selected_ids))
+    return df.loc[keep_mask].copy().reset_index(drop=True)
+
+
+# =========================
+# 1) ANALYZE (como /excel/analyze)
+# =========================
+@router.post("/analyze")
+async def analyze_conversion_excel(
+    file: UploadFile = File(...),
+):
+    input_name = f"input_conv_{uuid.uuid4()}.xlsx"
+    try:
+        with open(input_name, "wb") as f:
+            f.write(await file.read())
+
+        # arma el df_final de conversión con __ROW_ID__
+        df_final = build_conversion_df_from_file(input_name)
+
+        # detectar duplicados por Nombre (usa __ROW_ID__ en rows)
+        col_nombre = _find_col_loose(df_final, "NOMBRE")
+        if not col_nombre:
+            raise HTTPException(status_code=400, detail="No se encontró columna Nombre en conversión")
+
+        groups = build_duplicate_groups_with_row_id(df_final, col_nombre, row_id_col=ROW_ID_COL)
+
+        return {
+            "has_duplicates": len(groups) > 0,
+            "groups": groups,
+            "columns_hint": list(df_final.columns),
+        }
+    finally:
+        cleanup_files(input_name)
+
+
+# =========================
+# 2) EXCEL (descarga QA multi-hoja)
+#    - permite filtrar duplicados con selected_row_ids (lista en JSON body)
+# =========================
 @router.post("/excel")
-async def convertir_excel(file: UploadFile = File(...)):
-    # =========================
-    # Archivos temporales
-    # =========================
-    input_name = f"input_{uuid.uuid4()}.xlsx"
-    output_name = f"output_{uuid.uuid4()}.xlsx"
+async def convertir_excel(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
 
-    with open(input_name, "wb") as f:
-        f.write(await file.read())
+    # mismos flags que carga normal
+    apply_igv_cost: bool = Query(default=True, description="Aplicar IGV a precio de costo"),
+    apply_igv_sale: bool = Query(default=True, description="Aplicar IGV a precio de venta"),
+    is_selva: bool = Query(default=False, description="Modo selva (exonerado de IGV)"),
+    round_numeric: int | None = Query(default=None, description="Ej: 2 para redondear a 2 decimales"),
 
-    # =========================
-    # Leer Excel SIN headers
-    # =========================
-    df = pd.read_excel(input_name, header=None)
+    # ✅ seleccionados por duplicados: lista JSON (igual que /excel/normalize)
+    selected_row_ids: list[int] = Body(default=[]),
+):
+    input_name = f"input_conv_{uuid.uuid4()}.xlsx"
 
-    # =========================
-    # Configuración fija
-    # =========================
-    header_row = 2      # fila 3 en Excel
-    data_start = 4      # fila 5 en Excel
+    try:
+        with open(input_name, "wb") as f:
+            f.write(await file.read())
 
-    # =========================
-    # Columnas que NO entran en conversion
-    # =========================
-    excluir = [
-        "CODIGO DEL PRODUCTO","CODIGO ALTERNO","NOMBRE DEL PRODUCTO","DESCRIPCION","CATEGORIA","TIPO",
-        "PRECIO DE COSTO","PRECIO DE VENTA PRINCIPAL","RANGO DEL PRECIO","MODELO","UNIDAD","STOCK","MARCA",
-        "PRECIO LISTA 2",
-        "PRECIO LISTA 3"
-    ]
+        # arma df_final con __ROW_ID__
+        df_final = build_conversion_df_from_file(input_name)
 
-    # =========================
-    # Columnas que SÍ deben salir en el Excel final
-    # =========================
-    columnas_salida = [
-        "CODIGO DEL PRODUCTO","CODIGO ALTERNO","NOMBRE DEL PRODUCTO","DESCRIPCION","CATEGORIA","TIPO",
-        "PRECIO DE COSTO","PRECIO DE VENTA PRINCIPAL","RANGO DEL PRECIO","MODELO","UNIDAD","STOCK","MARCA",
-        "PRECIO LISTA 2",
-        "PRECIO LISTA 3"
-    ]
+        # filtrar duplicados si el frontend mandó selección
+        col_nombre = _find_col_loose(df_final, "NOMBRE")
+        if col_nombre and selected_row_ids:
+            try:
+                selected_set = set(int(x) for x in selected_row_ids)
+            except Exception:
+                raise HTTPException(status_code=400, detail="selected_row_ids inválido (lista de enteros)")
 
-    # =========================
-    # Leer encabezados
-    # =========================
-    fila_headers = df.iloc[header_row]
+            df_final = _filter_duplicates_by_selected(df_final, col_nombre, selected_set)
 
-    columnas_todas = {}        # todas las columnas detectadas
-    columnas_conversion = {}   # solo para armar "conversion"
+        # generar QA multi-hoja
+        qa_bytes, stats = build_conversion_qa_excel_bytes(
+            df_input=df_final,
+            is_selva=is_selva,
+            apply_igv_cost=apply_igv_cost,
+            apply_igv_sale=apply_igv_sale,
+            round_numeric=round_numeric,
+        )
 
-    for idx, nombre in fila_headers.items():
-        if pd.notna(nombre):
-            nombre_str = str(nombre).strip().upper()
-            columnas_todas[nombre_str] = idx
+        # cleanup input en background (opcional, pero consistente con tu patrón)
+        background_tasks.add_task(cleanup_files, input_name)
 
-            if nombre_str not in excluir:
-                columnas_conversion[idx] = nombre_str.replace(" ", "")
+        headers = {
+            "X-Rows-Before": str(stats.get("rows_before", "")),
+            "X-Rows-OK": str(stats.get("rows_ok", "")),
+            "X-Rows-Corrected": str(stats.get("rows_corrected", "")),
+            "X-Errors-Count": str(stats.get("errors_count", "")),
+            "X-Codes-Fixed": str(stats.get("codes_fixed", "")),
+            "Content-Disposition": 'attachment; filename="resultado_conversion_QA.xlsx"',
+        }
 
-    # =========================
-    # Construir conversion
-    # =========================
-    conversiones = []
-
-    for i in range(data_start, len(df)):
-        fila = df.iloc[i]
-        partes = []
-
-        for col, nombre in columnas_conversion.items():
-            valor = fila[col]
-            if pd.notna(valor):
-                partes.append(f"{nombre}-{nombre}-{valor}")
-
-        conversiones.append("#".join(partes))
-
-    # =========================
-    # Construir Excel FINAL
-    # =========================
-    df_final = pd.DataFrame()
-
-    # 👉 SOLO las columnas permitidas
-    for nombre in columnas_salida:
-        if nombre in columnas_todas:
-            idx = columnas_todas[nombre]
-            df_final[nombre] = df.iloc[data_start:, idx].values
-
-    # 👉 agregar conversion
-    df_final["conversion"] = conversiones
-
-    # =========================
-    # Guardar Excel
-    # =========================
-    df_final.to_excel(output_name, index=False)
-
-    os.remove(input_name)
-
-    return FileResponse(
-        output_name,
-        filename="resultado_conversion.xlsx",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        return StreamingResponse(
+            io.BytesIO(qa_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
+    finally:
+        # si uvicorn corta antes del background task, igual limpiamos
+        cleanup_files(input_name)

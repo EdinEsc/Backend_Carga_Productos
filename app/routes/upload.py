@@ -30,7 +30,8 @@ async def analyze_excel(
         raise HTTPException(status_code=400, detail="No se encontró columna NOMBRE")
 
     ROW_ID_COL = "__ROW_ID__"
-    df_norm[ROW_ID_COL] = range(2, 2 + len(df_norm))
+    # df_norm[ROW_ID_COL] = range(2, 2 + len(df_norm))
+    df_norm[ROW_ID_COL] = range(5, 5 + len(df_norm))
 
     groups = build_duplicate_groups(df_norm, col_nombre)
 
