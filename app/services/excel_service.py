@@ -1,5 +1,5 @@
 # =========================
-# excel_service.py (COMPLETO - LISTO PARA COPIAR Y PEGAR)
+# excel_service.py (COMPLETO - CON NOMBRE DE TIENDA DINÁMICO)
 # =========================
 import io
 import re
@@ -243,7 +243,7 @@ def _drop_all_empty_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# ✅ CONVERSIÓN: construir DF desde archivo (ESTO TE FALTABA)
+# CONVERSIÓN: construir DF desde archivo
 # ============================================================
 def build_conversion_df_from_file(
     file_path: str,
@@ -415,7 +415,7 @@ def normalize_excel_bytes(
     selected_row_ids: Optional[list[int]] = None,
     apply_igv_cost: bool = False,
     apply_igv_sale: bool = False,
-    is_selva: bool = False,
+    tienda_nombre: str = "Tienda1",
 ) -> Tuple[bytes, dict]:
     ROW_ID_COL = ROW_ID_COL_DEFAULT
 
@@ -477,7 +477,8 @@ def normalize_excel_bytes(
         col_modelo = "__MODELO__"
         df[col_modelo] = "S/M"
 
-    porcentaje_default = 0.0 if is_selva else 18.0
+    # PORCENTAJE ahora SIEMPRE 18
+    porcentaje_default = 18.0
     if col_porcentaje:
         df[col_porcentaje] = df[col_porcentaje].apply(to_number).apply(
             lambda x: porcentaje_default if _is_null(x) or x <= 0 else x
@@ -570,10 +571,19 @@ def normalize_excel_bytes(
         num_cols = df.select_dtypes(include=["number"]).columns
         df[num_cols] = df[num_cols].round(round_numeric)
 
-    # Auditoría + correcciones
+    # 👇 APLICAR IGV A TODOS LOS DATOS ANTES DE LA AUDITORÍA
+    df_con_igv = df.copy()
+    
+    if apply_igv_cost and col_pcost:
+        df_con_igv[col_pcost] = df_con_igv[col_pcost].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
+    
+    if apply_igv_sale and col_pventa:
+        df_con_igv[col_pventa] = df_con_igv[col_pventa].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
+
+    # Auditoría + correcciones (usando df_con_igv como base)
     errores = []
     ok_mask = []
-    corrected = df.copy()
+    corrected = df_con_igv.copy()
 
     def push_error(i, codigo, colname, valor, err, solucion, comentario):
         errores.append(
@@ -587,17 +597,17 @@ def normalize_excel_bytes(
             }
         )
 
-    for i in range(len(df)):
+    for i in range(len(df_con_igv)):
         ok = True
 
-        codigo = df.at[i, col_codigo] if col_codigo else ""
-        nombre = df.at[i, col_nombre] if col_nombre else ""
-        unidad = df.at[i, col_unidad] if col_unidad else ""
-        categoria = df.at[i, col_cat] if col_cat else "SIN CATEGORIA"
+        codigo = df_con_igv.at[i, col_codigo] if col_codigo else ""
+        nombre = df_con_igv.at[i, col_nombre] if col_nombre else ""
+        unidad = df_con_igv.at[i, col_unidad] if col_unidad else ""
+        categoria = df_con_igv.at[i, col_cat] if col_cat else "SIN CATEGORIA"
 
-        pc = float(df.at[i, col_pcost])
-        pv = float(df.at[i, col_pventa])
-        st = float(df.at[i, col_stock])
+        pc = float(df_con_igv.at[i, col_pcost])
+        pv = float(df_con_igv.at[i, col_pventa])
+        st = float(df_con_igv.at[i, col_stock])
 
         if not str(codigo).strip():
             ok = False
@@ -637,12 +647,11 @@ def normalize_excel_bytes(
 
         ok_mask.append(ok)
 
-    # IGV (solo si NO es selva)
-    if apply_igv_cost and col_pcost and not is_selva:
-        corrected[col_pcost] = corrected[col_pcost].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
-
-    if apply_igv_sale and col_pventa and not is_selva:
-        corrected[col_pventa] = corrected[col_pventa].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
+    # ❌ ELIMINAR ESTO - YA NO ES NECESARIO PORQUE IGV SE APLICÓ ANTES
+    # if apply_igv_cost and col_pcost:
+    #     corrected[col_pcost] = corrected[col_pcost].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
+    # if apply_igv_sale and col_pventa:
+    #     corrected[col_pventa] = corrected[col_pventa].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
 
     errores_df = pd.DataFrame(
         errores,
@@ -656,21 +665,24 @@ def normalize_excel_bytes(
         ],
     )
 
-    productos_ok = df[pd.Series(ok_mask)].copy()
+    productos_ok = df_con_igv[pd.Series(ok_mask)].copy()
     productos_corregidos = corrected[~pd.Series(ok_mask)].copy()
 
     # eliminar row_id antes de escribir
-    for dfx in (df, corrected, productos_ok, productos_corregidos):
+    for dfx in (df_con_igv, corrected, productos_ok, productos_corregidos):
         if ROW_ID_COL in dfx.columns:
             dfx.drop(columns=[ROW_ID_COL], inplace=True)
 
     final_df = pd.concat([productos_ok, productos_corregidos], ignore_index=True)
 
-    # Plantilla API
+    # Plantilla API - CON EL MISMO ORDEN DE SIEMPRE
     codigo_padre_default = ""
     codigo_alterno_default = ""
     r_lista1_default = "0-0-0"
     w_tienda1_default = final_df[col_stock] if col_stock else 0
+
+    # 👇 Usar el nombre de la tienda para la columna
+    nombre_columna_tienda = f"W-{tienda_nombre}"
 
     plantilla_api = pd.DataFrame(
         {
@@ -685,38 +697,39 @@ def normalize_excel_bytes(
             "stock minimo": final_df[col_stock_min] if col_stock_min else "",
             "precio costo": final_df[col_pcost],
             "precio venta": final_df[col_pventa],
-            "porcentaje costo": final_df[col_porcentaje] if col_porcentaje else (0.0 if is_selva else 18.0),
+            "porcentaje costo": final_df[col_porcentaje] if col_porcentaje else 18.0,
             "R-Lista1": r_lista1_default,
             "unidad": final_df[col_unidad] if col_unidad else "",
             "Marca": final_df[col_marca] if col_marca else "S/M",
             "Modelo": final_df[col_modelo] if col_modelo else "S/M",
             "Almacenable": final_df[col_almacenable] if col_almacenable else "SI",
-            "W-Tienda1": w_tienda1_default,
+            nombre_columna_tienda: w_tienda1_default,
         }
     )
 
-    plantilla_api = plantilla_api[
-        [
-            "Nombre",
-            "Descripcion",
-            "codigo padre",
-            "codigo",
-            "Codigo alterno",
-            "codigo barra",
-            "Categoria",
-            "stock",
-            "stock minimo",
-            "precio costo",
-            "precio venta",
-            "porcentaje costo",
-            "R-Lista1",
-            "unidad",
-            "Marca",
-            "Modelo",
-            "Almacenable",
-            "W-Tienda1",
-        ]
+    # 👇 Lista de columnas en orden exacto
+    columnas_ordenadas = [
+        "Nombre",
+        "Descripcion",
+        "codigo padre",
+        "codigo",
+        "Codigo alterno",
+        "codigo barra",
+        "Categoria",
+        "stock",
+        "stock minimo",
+        "precio costo",
+        "precio venta",
+        "porcentaje costo",
+        "R-Lista1",
+        "unidad",
+        "Marca",
+        "Modelo",
+        "Almacenable",
+        nombre_columna_tienda,
     ]
+    
+    plantilla_api = plantilla_api[columnas_ordenadas]
 
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as w:
@@ -731,21 +744,20 @@ def normalize_excel_bytes(
         "rows_corrected": int(len(productos_corregidos)),
         "errors_count": int(len(errores_df)),
         "codes_fixed": int(codes_fixed),
-        "is_selva": bool(is_selva),
     }
 
     return out.getvalue(), stats
 
 
 # ============================================================
-# CARGA POR CONVERSIÓN: Limpieza del output (aplica reglas y códigos)
+# CARGA POR CONVERSIÓN: Limpieza del output
 # ============================================================
 def clean_conversion_output_df(
     df_final: pd.DataFrame,
-    is_selva: bool = False,
     apply_igv_cost: bool = False,
     apply_igv_sale: bool = False,
     round_numeric: Optional[int] = None,
+    tienda_nombre: str = "Tienda1",  # 👈 NUEVO PARÁMETRO
 ) -> tuple[pd.DataFrame, dict]:
     df = df_final.copy()
     df.columns = [normalize_text_value(c) for c in df.columns]
@@ -824,7 +836,8 @@ def clean_conversion_output_df(
         df["MODELO"] = "S/M"
         col_modelo = "MODELO"
 
-    porcentaje_default = 0.0 if is_selva else 18.0
+    # PORCENTAJE ahora SIEMPRE 18
+    porcentaje_default = 18.0
     if col_porcentaje:
         df[col_porcentaje] = df[col_porcentaje].apply(to_number).apply(lambda x: porcentaje_default if _is_null(x) or x <= 0 else x)
     else:
@@ -893,21 +906,26 @@ def clean_conversion_output_df(
         must_fix = (~pv_was_blank) & (df[col_pventa] <= df[col_pcost])
         df.loc[must_fix, col_pventa] = df.loc[must_fix, col_pcost] + 1.0
 
-    # IGV (protegido Selva)
-    if apply_igv_cost and not is_selva and col_pcost:
+    # IGV (SIEMPRE se aplica si los toggles están activos)
+    if apply_igv_cost and col_pcost:
         df[col_pcost] = df[col_pcost].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
-    if apply_igv_sale and not is_selva and col_pventa:
+    if apply_igv_sale and col_pventa:
         df[col_pventa] = df[col_pventa].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
 
-    # W-TIENDA1 = STOCK limpio (si existe)
-    if col_w_tienda1 and col_stock:
-        df[col_w_tienda1] = df[col_stock]
+    # W-TIENDA1 = STOCK limpio con nombre dinámico
+    nombre_columna_tienda = f"W-{tienda_nombre}"
+    if col_stock:
+        df[nombre_columna_tienda] = df[col_stock]
+    
+    # Eliminar la columna antigua si existe
+    if col_w_tienda1 and col_w_tienda1 in df.columns:
+        df.drop(columns=[col_w_tienda1], inplace=True)
 
     if round_numeric is not None:
         num_cols = df.select_dtypes(include=["number"]).columns
         df[num_cols] = df[num_cols].round(round_numeric)
 
-    stats = {"codes_fixed": int(codes_fixed), "is_selva": bool(is_selva)}
+    stats = {"codes_fixed": int(codes_fixed)}
     return df, stats
 
 
@@ -916,10 +934,10 @@ def clean_conversion_output_df(
 # ============================================================
 def build_conversion_qa_excel_bytes(
     df_input: pd.DataFrame,
-    is_selva: bool = False,
     apply_igv_cost: bool = False,
     apply_igv_sale: bool = False,
     round_numeric: Optional[int] = None,
+    tienda_nombre: str = "Tienda1",  # 👈 NUEVO PARÁMETRO
 ) -> tuple[bytes, dict]:
     ROW_ID_COL = ROW_ID_COL_DEFAULT
 
@@ -929,10 +947,10 @@ def build_conversion_qa_excel_bytes(
 
     cleaned, stats_clean = clean_conversion_output_df(
         df_final=df0,
-        is_selva=is_selva,
         apply_igv_cost=apply_igv_cost,
         apply_igv_sale=apply_igv_sale,
         round_numeric=round_numeric,
+        tienda_nombre=tienda_nombre,
     )
 
     col_codigo = None
@@ -1051,6 +1069,5 @@ def build_conversion_qa_excel_bytes(
         "rows_corrected": int(len(productos_corregidos)),
         "errors_count": int(len(errores_df)),
         "codes_fixed": int(stats_clean.get("codes_fixed", 0)),
-        "is_selva": bool(is_selva),
     }
     return out.getvalue(), stats

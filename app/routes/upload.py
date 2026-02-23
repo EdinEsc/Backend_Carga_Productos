@@ -22,7 +22,6 @@ async def analyze_excel(
 ):
     content = await file.read()
 
-    # Normaliza primero (para que los duplicados se muestren ya con todos los campos limpios)
     df_norm, meta, _stats = normalize_to_dataframe(content, round_numeric=round_numeric)
 
     col_nombre = meta.get("col_nombre")
@@ -30,7 +29,6 @@ async def analyze_excel(
         raise HTTPException(status_code=400, detail="No se encontró columna NOMBRE")
 
     ROW_ID_COL = "__ROW_ID__"
-    # df_norm[ROW_ID_COL] = range(2, 2 + len(df_norm))
     df_norm[ROW_ID_COL] = range(5, 5 + len(df_norm))
 
     groups = build_duplicate_groups(df_norm, col_nombre)
@@ -50,12 +48,12 @@ async def analyze_excel(
 async def normalize_excel(
     upload_id: str = Query(...),
 
-    # ⬇️ BOTÓN 1 y BOTÓN 2
+    # IGV toggles
     apply_igv_cost: bool = Query(default=False, description="Aplicar IGV a precio de costo"),
     apply_igv_sale: bool = Query(default=False, description="Aplicar IGV a precio de venta"),
     
-    # ⬇️ NUEVO: Parámetro para Selva
-    is_selva: bool = Query(default=False, description="Activar modo Selva (0% y sin IGV)"),
+    # Nombre de la tienda
+    tienda_nombre: str = Query(default="Tienda1", description="Nombre de la tienda para columna W-TIENDA1"),
 
     selected_row_ids: list[int] = Body(default=[]),
     round_numeric: int | None = Query(default=None, description="Ej: 2 para redondear a 2 decimales"),
@@ -65,14 +63,13 @@ async def normalize_excel(
 
     content = UPLOADS[upload_id]
 
-    # Pasar TODOS los parámetros al servicio
     cleaned_bytes, stats = normalize_excel_bytes(
         excel_bytes=content,
         round_numeric=round_numeric,
         selected_row_ids=selected_row_ids,
         apply_igv_cost=apply_igv_cost,
         apply_igv_sale=apply_igv_sale,
-        is_selva=is_selva,  # ⬅️ IMPORTANTE: pasar el parámetro
+        tienda_nombre=tienda_nombre,
     )
 
     filename = "archivo_QA.xlsx"
