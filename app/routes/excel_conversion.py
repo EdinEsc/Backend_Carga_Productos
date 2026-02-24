@@ -432,6 +432,7 @@ async def convertir_excel(
     tienda_nombre: str = Query(default="Tienda1", description="Nombre de la tienda para columna W-TIENDA1"),
     selected_row_ids: str | None = Query(default=None, description="CSV de __ROW_ID__: ej 5,9,12"),
 ):
+    print("DEBUG /conversion/excel tienda_nombre =", repr(tienda_nombre))
     input_name = f"input_conv_{uuid.uuid4()}.xlsx"
     
     try:

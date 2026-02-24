@@ -58,6 +58,7 @@ async def normalize_excel(
     selected_row_ids: list[int] = Body(default=[]),
     round_numeric: int | None = Query(default=None, description="Ej: 2 para redondear a 2 decimales"),
 ):
+    print("DEBUG /excel/normalize tienda_nombre =", repr(tienda_nombre))
     if upload_id not in UPLOADS:
         raise HTTPException(status_code=400, detail="upload_id inválido o expirado")
 
