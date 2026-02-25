@@ -265,7 +265,9 @@ def generar_excel_conversion_bytes(
     df_base = pd.DataFrame()
     
     # 👇 ORDEN EXACTO DE COLUMNAS (22 columnas)
-    df_base["nombre"] = get_series("nombre", "")
+    # 👇 CAMBIO: Para NOMBRE, solo convertir a mayúsculas sin limpieza de caracteres especiales
+    df_base["nombre"] = get_series("nombre", "").apply(lambda x: str(x).upper() if pd.notna(x) else "")
+    
     df_base["descripcion"] = get_series("descripcion", "")
     df_base["codigo padre"] = get_series("codigo padre", "")
     df_base["código"] = codigos_limpios

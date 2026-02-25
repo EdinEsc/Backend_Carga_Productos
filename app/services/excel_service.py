@@ -448,8 +448,11 @@ def normalize_excel_bytes(
         if df[c].dtype == "object":
             df[c] = df[c].apply(normalize_text_value)
 
+    # 👇 CAMBIO: Para NOMBRE, solo convertir a mayúsculas sin limpieza de caracteres especiales
     if col_nombre:
-        df[col_nombre] = df[col_nombre].apply(clean_alnum_spaces)
+        df[col_nombre] = df[col_nombre].apply(lambda x: str(x).upper() if pd.notna(x) else "")
+    
+    # Las demás columnas mantienen su limpieza normal
     if col_desc:
         df[col_desc] = df[col_desc].apply(clean_alnum_spaces)
     if col_cat:
@@ -647,12 +650,6 @@ def normalize_excel_bytes(
 
         ok_mask.append(ok)
 
-    # ❌ ELIMINAR ESTO - YA NO ES NECESARIO PORQUE IGV SE APLICÓ ANTES
-    # if apply_igv_cost and col_pcost:
-    #     corrected[col_pcost] = corrected[col_pcost].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
-    # if apply_igv_sale and col_pventa:
-    #     corrected[col_pventa] = corrected[col_pventa].apply(lambda x: x * IGV_FACTOR if not _is_null(x) else x)
-
     errores_df = pd.DataFrame(
         errores,
         columns=[
@@ -747,6 +744,10 @@ def normalize_excel_bytes(
     }
 
     return out.getvalue(), stats
+
+
+
+
 
 
 # ============================================================
