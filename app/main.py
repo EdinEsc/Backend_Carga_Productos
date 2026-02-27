@@ -1,9 +1,10 @@
-
-
 # from fastapi import FastAPI
 # from fastapi.middleware.cors import CORSMiddleware
+
 # from app.routes.upload import router as upload_router
-# from app.routes.excel_conversion import router as conversion_router # 👈 AÑADIR
+# from app.routes.excel_conversion import router as conversion_router
+
+
 
 # app = FastAPI()
 
@@ -27,20 +28,18 @@
 # )
 
 # app.include_router(upload_router)
-# app.include_router(conversion_router)  # 👈 AÑADIR
+# app.include_router(conversion_router)
 
 
 
-# app/main.py
+
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routes.upload import router as upload_router
-from app.routes.excel_conversion import router as conversion_router
-# from app.routes import send
+from app.routes import router
 
-
-app = FastAPI()
+app = FastAPI(title="Excel Processor API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +60,8 @@ app.add_middleware(
     ],
 )
 
-app.include_router(upload_router)
-app.include_router(conversion_router)
-# app.include_router(send.router)
+app.include_router(router)
+
+@app.get("/")
+async def root():
+    return {"message": "Excel Processor API", "version": "1.0"}

@@ -4,7 +4,7 @@ import io
 from fastapi import APIRouter, File, UploadFile, Query, HTTPException, Body
 from fastapi.responses import StreamingResponse
 
-from app.services.excel_service import (
+from app.services.excel_normalize_service import (
     normalize_excel_bytes,
     normalize_to_dataframe,
     build_duplicate_groups,
@@ -32,6 +32,31 @@ async def analyze_excel(
     df_norm[ROW_ID_COL] = range(5, 5 + len(df_norm))
 
     groups = build_duplicate_groups(df_norm, col_nombre)
+    
+    # Analizar duplicados en CÓDIGO
+    grupos_codigo = []
+    col_codigo = meta.get("col_codigo")
+    if col_codigo and col_codigo in df_norm.columns:
+        codigos = df_norm[col_codigo].astype(str).str.strip()
+        codigos = codigos[codigos.ne("") & codigos.ne("nan")]
+        dup_codigos_mask = codigos.duplicated(keep=False)
+        if dup_codigos_mask.any():
+            dups_codigo = df_norm.loc[dup_codigos_mask]
+            for codigo, grupo in dups_codigo.groupby(col_codigo):
+                rows = []
+                for _, row in grupo.iterrows():
+                    row_dict = {
+                        "fila": int(row[ROW_ID_COL]),
+                        "codigo": str(row[col_codigo]),
+                        "nombre": str(row.get(col_nombre, ""))[:50]
+                    }
+                    rows.append(row_dict)
+                
+                grupos_codigo.append({
+                    "codigo": str(codigo),
+                    "count": len(grupo),
+                    "rows": rows
+                })
 
     upload_id = str(uuid4())
     UPLOADS[upload_id] = content
@@ -40,6 +65,8 @@ async def analyze_excel(
         "upload_id": upload_id,
         "has_duplicates": len(groups) > 0,
         "groups": groups,
+        "has_code_duplicates": len(grupos_codigo) > 0,
+        "code_duplicate_groups": grupos_codigo,
         "columns_hint": list(df_norm.columns),
     }
 
